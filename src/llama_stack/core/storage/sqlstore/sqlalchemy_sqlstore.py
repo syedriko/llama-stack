@@ -72,10 +72,11 @@ class SqlAlchemySqlStoreImpl(SqlStore):
     def __init__(self, config: SqlAlchemySqlStoreConfig):
         self.config = config
         self._is_sqlite_backend = "sqlite" in self.config.engine_str
-        self.async_session = async_sessionmaker(self.create_engine())
+        self._engine = self._create_engine()
+        self.async_session = async_sessionmaker(self._engine)
         self.metadata = MetaData()
 
-    def create_engine(self) -> AsyncEngine:
+    def _create_engine(self) -> AsyncEngine:
         # Configure connection args for better concurrency support
         connect_args = {}
         if self._is_sqlite_backend:
@@ -106,6 +107,12 @@ class SqlAlchemySqlStoreImpl(SqlStore):
                 cursor.close()
 
         return engine
+
+    async def shutdown(self) -> None:
+        """Dispose the engine and close all connections."""
+        if self._engine:
+            await self._engine.dispose()
+            self._engine = None
 
     async def create_table(
         self,
@@ -142,8 +149,7 @@ class SqlAlchemySqlStoreImpl(SqlStore):
         else:
             sqlalchemy_table = self.metadata.tables[table]
 
-        engine = self.create_engine()
-        async with engine.begin() as conn:
+        async with self._engine.begin() as conn:
             await conn.run_sync(self.metadata.create_all, tables=[sqlalchemy_table], checkfirst=True)
 
     async def insert(self, table: str, data: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> None:
@@ -321,10 +327,8 @@ class SqlAlchemySqlStoreImpl(SqlStore):
         nullable: bool = True,
     ) -> None:
         """Add a column to an existing table if the column doesn't already exist."""
-        engine = self.create_engine()
-
         try:
-            async with engine.begin() as conn:
+            async with self._engine.begin() as conn:
 
                 def check_column_exists(sync_conn):
                     inspector = inspect(sync_conn)
@@ -348,7 +352,7 @@ class SqlAlchemySqlStoreImpl(SqlStore):
 
                 # Create the ALTER TABLE statement
                 # Note: We need to get the dialect-specific type name
-                dialect = engine.dialect
+                dialect = self._engine.dialect
                 type_impl = sqlalchemy_type()
                 compiled_type = type_impl.compile(dialect=dialect)
 
